@@ -22,7 +22,6 @@ class BERTAttentionAnalyzer:
         )
         self.model = self.model.to(device)
         self.model.eval()
-        print(f"BERT-base-uncased loaded successfully on {device}")
         print("Model architecture: 12 layers, 12 attention heads, 768 hidden dimensions")
         print("\nNote: BERT adds [CLS] at start (index 0) and [SEP] at end of your text")
 
@@ -227,7 +226,17 @@ class BERTAttentionAnalyzer:
                 print(f"{score:>5.3f}", end='')
             print()
 
-    def examine_attention_head_internals(self, text, layer=0, head=0):
+    def format_vector_dimensions(self, vector, dims_per_line=8, precision=2):
+        """Format a vector showing all dimensions with line wrapping."""
+        lines = []
+        for i in range(0, len(vector), dims_per_line):
+            chunk = vector[i:i+dims_per_line]
+            formatted_values = [f"{val:>{precision+4}.{precision}f}" for val in chunk]
+            line = f"  [{i:3d}-{min(i+dims_per_line-1, len(vector)-1):3d}]: " + " ".join(formatted_values)
+            lines.append(line)
+        return "\n".join(lines)
+
+    def examine_attention_head_internals(self, text, layer=0, head=0, show_dimensions='all'):
         print(f"\nExamining internals of Layer {layer+1}, Head {head+1}")
         print("="*70)
         attention_data = self.get_attention_weights(text)
@@ -238,6 +247,7 @@ class BERTAttentionAnalyzer:
         hidden_dim = self.model.config.hidden_size
         num_heads = self.model.config.num_attention_heads
         head_dim = hidden_dim // num_heads
+        
         Q = attention_layer.query(layer_input)
         K = attention_layer.key(layer_input)
         V = attention_layer.value(layer_input)
@@ -245,44 +255,66 @@ class BERTAttentionAnalyzer:
         Q = Q.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
         K = K.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
         V = V.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+        
         Q_head = Q[0, head].detach().cpu().numpy()
         K_head = K[0, head].detach().cpu().numpy()
         V_head = V[0, head].detach().cpu().numpy()
+        
         scores = np.matmul(Q_head, K_head.T) / np.sqrt(head_dim)
         attention_probs = torch.nn.functional.softmax(torch.tensor(scores), dim=-1).numpy()
+        
+        if show_dimensions == 'all':
+            dims_to_show = head_dim
+            dims_label = f"all {head_dim} dimensions"
+        else:
+            dims_to_show = min(show_dimensions, head_dim)
+            dims_label = f"first {dims_to_show} dimensions"
+        
+        print(f"\nNote: Each attention head has {head_dim} dimensions (768 total / 12 heads)")
+        print(f"Showing: {dims_label}")
+        
         print("\n" + "="*70)
         print(f"QUERY (Q) MATRIX - Shape: {Q_head.shape}")
         print("="*70)
-        print("Showing first 10 dimensions of each token's query vector:")
-        print("-"*70)
-        print(f"{'Token':<15} " + " ".join([f"Q{i:<2}" for i in range(10)]))
-        print("-"*70)
         for i, token in enumerate(tokens):
-            values = " ".join([f"{val:>5.2f}" for val in Q_head[i][:10]])
             norm = np.linalg.norm(Q_head[i])
-            print(f"{token:<15} {values} ... ||Q||={norm:.2f}")
+            print(f"\nToken {i}: '{token}' (||Q||={norm:.2f})")
+            if show_dimensions == 'all':
+                print(self.format_vector_dimensions(Q_head[i]))
+            else:
+                values = " ".join([f"{val:>5.2f}" for val in Q_head[i][:dims_to_show]])
+                print(f"  {values}")
+                if dims_to_show < head_dim:
+                    print(f"  ... ({head_dim - dims_to_show} more dimensions)")
+        
         print("\n" + "="*70)
         print(f"KEY (K) MATRIX - Shape: {K_head.shape}")
         print("="*70)
-        print("Showing first 10 dimensions of each token's key vector:")
-        print("-"*70)
-        print(f"{'Token':<15} " + " ".join([f"K{i:<2}" for i in range(10)]))
-        print("-"*70)
         for i, token in enumerate(tokens):
-            values = " ".join([f"{val:>5.2f}" for val in K_head[i][:10]])
             norm = np.linalg.norm(K_head[i])
-            print(f"{token:<15} {values} ... ||K||={norm:.2f}")
+            print(f"\nToken {i}: '{token}' (||K||={norm:.2f})")
+            if show_dimensions == 'all':
+                print(self.format_vector_dimensions(K_head[i]))
+            else:
+                values = " ".join([f"{val:>5.2f}" for val in K_head[i][:dims_to_show]])
+                print(f"  {values}")
+                if dims_to_show < head_dim:
+                    print(f"  ... ({head_dim - dims_to_show} more dimensions)")
+        
         print("\n" + "="*70)
         print(f"VALUE (V) MATRIX - Shape: {V_head.shape}")
         print("="*70)
-        print("Showing first 10 dimensions of each token's value vector:")
-        print("-"*70)
-        print(f"{'Token':<15} " + " ".join([f"V{i:<2}" for i in range(10)]))
-        print("-"*70)
         for i, token in enumerate(tokens):
-            values = " ".join([f"{val:>5.2f}" for val in V_head[i][:10]])
             norm = np.linalg.norm(V_head[i])
-            print(f"{token:<15} {values} ... ||V||={norm:.2f}")
+            print(f"\nToken {i}: '{token}' (||V||={norm:.2f})")
+            if show_dimensions == 'all':
+                print(self.format_vector_dimensions(V_head[i]))
+            else:
+                values = " ".join([f"{val:>5.2f}" for val in V_head[i][:dims_to_show]])
+                print(f"  {values}")
+                if dims_to_show < head_dim:
+                    print(f"  ... ({head_dim - dims_to_show} more dimensions)")
+        
         print("\n" + "="*70)
         print("Q-K SIMILARITY MATRIX (before softmax)")
         print("="*70)
@@ -306,34 +338,44 @@ class BERTAttentionAnalyzer:
             print("...")
         if len(tokens) > 6:
             print("...")
+        
         print("\n" + "="*70)
         print("ATTENTION OUTPUT COMPUTATION")
         print("="*70)
         print("Attention(Q,K,V) = softmax(QK^T/√d_k)V")
         print("\nFor each token, the output is a weighted sum of all value vectors,")
         print("where weights come from the softmax of query-key similarities.")
+        
         attention_output = np.matmul(attention_probs, V_head)
-        print("\nOutput vectors (first 10 dims):")
-        print("-"*70)
-        print(f"{'Token':<15} " + " ".join([f"O{i:<2}" for i in range(10)]))
+        print(f"\nOutput vectors ({dims_label}):")
         print("-"*70)
         for i in range(min(5, len(tokens))):
             token = tokens[i]
-            values = " ".join([f"{val:>5.2f}" for val in attention_output[i][:10]])
             norm = np.linalg.norm(attention_output[i])
-            print(f"{token:<15} {values} ... ||O||={norm:.2f}")
+            print(f"\nToken {i}: '{token}' (||O||={norm:.2f})")
+            if show_dimensions == 'all':
+                print(self.format_vector_dimensions(attention_output[i]))
+            else:
+                values = " ".join([f"{val:>5.2f}" for val in attention_output[i][:dims_to_show]])
+                print(f"  {values}")
+                if dims_to_show < head_dim:
+                    print(f"  ... ({head_dim - dims_to_show} more dimensions)")
+        
         print("\n" + "="*70)
         print("VECTOR STATISTICS")
         print("="*70)
+        
         def avg_cosine_sim(matrix):
             normalized = matrix / (np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-8)
             sim_matrix = np.matmul(normalized, normalized.T)
             mask = ~np.eye(len(matrix), dtype=bool)
             return np.mean(sim_matrix[mask])
+        
         print(f"\nAverage cosine similarity between tokens:")
         print(f"  Query vectors:  {avg_cosine_sim(Q_head):.3f}")
         print(f"  Key vectors:    {avg_cosine_sim(K_head):.3f}")
         print(f"  Value vectors:  {avg_cosine_sim(V_head):.3f}")
+        
         for name, matrix in [("Query", Q_head), ("Key", K_head), ("Value", V_head)]:
             normalized = matrix / (np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-8)
             sim_matrix = np.matmul(normalized, normalized.T)
@@ -341,13 +383,20 @@ class BERTAttentionAnalyzer:
             avg_sims = np.mean(sim_matrix, axis=1)
             most_unique_idx = np.argmin(avg_sims)
             print(f"\nMost unique {name} vector: '{tokens[most_unique_idx]}' (avg similarity: {avg_sims[most_unique_idx]:.3f})")
+        
+        print("\n" + "="*70)
+        print("DIMENSION-WISE STATISTICS")
+        print("="*70)
+        
+        for name, matrix in [("Query", Q_head), ("Key", K_head), ("Value", V_head)]:
+            print(f"\n{name} dimensions with highest variance:")
+            variances = np.var(matrix, axis=0)
+            top_var_dims = np.argsort(variances)[-5:][::-1]
+            for dim in top_var_dims:
+                print(f"  Dim {dim}: variance={variances[dim]:.4f}, range=[{np.min(matrix[:, dim]):.2f}, {np.max(matrix[:, dim]):.2f}]")
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Analyze attention patterns in BERT-base-uncased model',
-        epilog='Examples:\n'
-               '  Basic: python bert_attention_visualizer.py --text "Paris is the capital" --focus-token 1\n'
-               '  Q/K/V: python bert_attention_visualizer.py --text "Paris is in Texas" --examine-head --layer 0 --head 3',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument('--text', type=str, required=True,
@@ -366,23 +415,34 @@ def main():
                         help='Deep dive into Q/K/V matrices of a specific attention head')
     parser.add_argument('--show-tokens-only', action='store_true',
                         help='Only show tokenization with indices (useful for finding token positions)')
+    parser.add_argument('--show-all-dims', action='store_true',
+                        help='Show all 64 dimensions per head instead of just first 10 (only with --examine-head)')
+    parser.add_argument('--show-dims', type=int, default=10,
+                        help='Number of dimensions to show (default: 10, use with --examine-head)')
     args = parser.parse_args()
+    
     if args.layer is not None and (args.layer < 0 or args.layer > 11):
         print("Error: Layer must be between 0 and 11 for BERT-base")
         return
     if args.head < 0 or args.head > 11:
         print("Error: Head must be between 0 and 11 for BERT-base")
         return
+    
     analyzer = BERTAttentionAnalyzer()
+    
     if args.show_tokens_only:
         attention_data = analyzer.get_attention_weights(args.text)
         analyzer.print_tokens(attention_data['tokens'])
         return
+    
     if args.focus_token is not None:
         analyzer.visualize_specific_token_attention(args.text, args.focus_token, args.layer, args.include_special)
     elif args.examine_head:
         layer = args.layer if args.layer is not None else 0
-        analyzer.examine_attention_head_internals(args.text, layer, args.head)
+        if args.show_all_dims:
+            analyzer.examine_attention_head_internals(args.text, layer, args.head, show_dimensions='all')
+        else:
+            analyzer.examine_attention_head_internals(args.text, layer, args.head, show_dimensions=args.show_dims)
     elif args.all_layers:
         analyzer.analyze_multiple_layers(args.text, args.include_special)
     else:
