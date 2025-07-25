@@ -197,8 +197,8 @@ class BERTAttentionAnalyzer:
                     else:
                         print(f"{i:<3} {token:<15} {score:.4f} {bar}")
                 max_idx = np.argmax(avg_attention_to_token)
-                print(f"    → Highest: {tokens[max_idx]} ({avg_attention_to_token[max_idx]:.4f})")
-                print(f"    → Average: {np.mean(avg_attention_to_token):.4f}")
+                print(f" Highest: {tokens[max_idx]} ({avg_attention_to_token[max_idx]:.4f})")
+                print(f" Average: {np.mean(avg_attention_to_token):.4f}")
             print("\n" + "="*70)
             print("SUMMARY ACROSS ALL LAYERS:")
             print("="*70)
