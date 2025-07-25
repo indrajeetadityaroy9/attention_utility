@@ -19,6 +19,7 @@ class BERTAttentionVisualizer:
         self.model_name = model_name
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self._load_model()
+        
     def _load_model(self):
         print(f"Loading {self.model_name}...")
         self.tokenizer = BertTokenizer.from_pretrained(self.model_name)
@@ -28,6 +29,7 @@ class BERTAttentionVisualizer:
             output_hidden_states=True,
             attn_implementation="eager"
         ).to(self.device).eval()
+
     def analyze_text(self, text: str) -> AttentionData:
         inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
@@ -40,8 +42,7 @@ class BERTAttentionVisualizer:
             hidden_states=outputs.hidden_states,
             input_ids=inputs['input_ids']
         )
-    def get_attention_matrix(self, data: AttentionData, layer: int, head: int, 
-                           exclude_special: bool = True) -> Tuple[np.ndarray, List[str]]:
+    def get_attention_matrix(self, data: AttentionData, layer: int, head: int, exclude_special: bool = True) -> Tuple[np.ndarray, List[str]]:
         attention = data.attention_weights[layer][0, head].cpu().numpy()
         tokens = data.tokens
         if exclude_special:
@@ -49,12 +50,14 @@ class BERTAttentionVisualizer:
             attention = attention[mask][:, mask]
             tokens = [t for t, m in zip(tokens, mask) if m]
         return attention, tokens
+    
     def get_layer_attention_patterns(self, data: AttentionData, layer: int) -> Dict[str, np.ndarray]:
         patterns = {}
         for head in range(self.model.config.num_attention_heads):
             attention = data.attention_weights[layer][0, head].cpu().numpy()
             patterns[f'head_{head}'] = attention
         return patterns
+    
     def _get_content_mask(self, input_ids: torch.Tensor) -> np.ndarray:
         special_tokens = {101, 102, 0}
         return ~np.isin(input_ids.cpu().numpy(), list(special_tokens))
