@@ -2,447 +2,320 @@ import torch
 import numpy as np
 from transformers import BertTokenizer, BertModel
 import argparse
+from dataclasses import dataclass
+from typing import List, Tuple, Optional, Dict
+import warnings
+warnings.filterwarnings('ignore')
 
-class BERTAttentionAnalyzer:
-    def __init__(self):
-        self.model_name = "bert-base-uncased"
-        self.tokenizer = None
-        self.model = None
-        self.load_model()
+@dataclass
+class AttentionData:
+    tokens: List[str]
+    attention_weights: Tuple[torch.Tensor]
+    hidden_states: Tuple[torch.Tensor]
+    input_ids: torch.Tensor
 
-    def load_model(self):
-        print(f"Loading BERT-base-uncased model...")
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+class BERTAttentionVisualizer:
+    def __init__(self, model_name: str = "bert-base-uncased"):
+        self.model_name = model_name
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self._load_model()
+    def _load_model(self):
+        print(f"Loading {self.model_name}...")
         self.tokenizer = BertTokenizer.from_pretrained(self.model_name)
         self.model = BertModel.from_pretrained(
-            self.model_name, 
+            self.model_name,
             output_attentions=True,
             output_hidden_states=True,
             attn_implementation="eager"
-        )
-        self.model = self.model.to(device)
-        self.model.eval()
-
-    def get_attention_weights(self, text):
+        ).to(self.device).eval()
+    def analyze_text(self, text: str) -> AttentionData:
         inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True)
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
         with torch.no_grad():
-            outputs = self.model(**inputs, output_attentions=True, output_hidden_states=True)
+            outputs = self.model(**inputs)
         tokens = self.tokenizer.convert_ids_to_tokens(inputs['input_ids'][0])
-        attention = outputs.attentions
-        hidden_states = outputs.hidden_states
-        return {
-            'tokens': tokens,
-            'attention': attention,
-            'hidden_states': hidden_states,
-            'input_ids': inputs['input_ids']
-        }
-    
-    def print_tokens(self, tokens, highlight_index=None):
+        return AttentionData(
+            tokens=tokens,
+            attention_weights=outputs.attentions,
+            hidden_states=outputs.hidden_states,
+            input_ids=inputs['input_ids']
+        )
+    def get_attention_matrix(self, data: AttentionData, layer: int, head: int, 
+                           exclude_special: bool = True) -> Tuple[np.ndarray, List[str]]:
+        attention = data.attention_weights[layer][0, head].cpu().numpy()
+        tokens = data.tokens
+        if exclude_special:
+            mask = self._get_content_mask(data.input_ids[0])
+            attention = attention[mask][:, mask]
+            tokens = [t for t, m in zip(tokens, mask) if m]
+        return attention, tokens
+    def get_layer_attention_patterns(self, data: AttentionData, layer: int) -> Dict[str, np.ndarray]:
+        patterns = {}
+        for head in range(self.model.config.num_attention_heads):
+            attention = data.attention_weights[layer][0, head].cpu().numpy()
+            patterns[f'head_{head}'] = attention
+        return patterns
+    def _get_content_mask(self, input_ids: torch.Tensor) -> np.ndarray:
+        special_tokens = {101, 102, 0}
+        return ~np.isin(input_ids.cpu().numpy(), list(special_tokens))
+
+class AttentionFormatter:
+    @staticmethod
+    def print_tokens(tokens: List[str], highlight_idx: Optional[int] = None):
         print("\n" + "="*60)
         print("TOKENIZATION")
         print("="*60)
-        print(f"{'Index':<10} {'Token':<20} {'Type':<15}")
-        print("-" * 45)
         for i, token in enumerate(tokens):
-            special = token in ['[CLS]', '[SEP]', '[PAD]']
-            marker = "special" if special else "word"
-            if highlight_index is not None and i == highlight_index:
-                print(f"\033[1;32m{i:<10} {token:<20} {marker:<15} ← FOCUS TOKEN\033[0m")
+            marker = "*" if token in ['[CLS]', '[SEP]', '[PAD]'] else " "
+            if highlight_idx == i:
+                print(f"\033[92m{i:3d} {marker} {token:<20} ← TARGET\033[0m")
             else:
-                print(f"{i:<10} {token:<20} {marker:<15}")
-
-    def print_attention_matrix(self, attention_data, layer=0, head=0, include_special=False):
-        tokens = attention_data['tokens']
-        attention_weights = attention_data['attention']
-        attention = attention_weights[layer][0, head].cpu().numpy()
-        if not include_special:
-            input_ids = attention_data['input_ids'].cpu().numpy()[0]
-            special_tokens = {101, 102, 0}
-            mask = ~np.isin(input_ids, list(special_tokens))
-            attention = attention[mask][:, mask]
-            tokens = [t for t, m in zip(tokens, mask) if m]
-        print(f"\n" + "="*60)
-        print(f"ATTENTION MATRIX - Layer {layer+1}/12, Head {head+1}/12")
-        print("="*60)
-        print(f"{'From/To':<15}", end='')
-        for token in tokens:
-            print(f"{token[:8]:<10}", end='')
+                print(f"{i:3d} {marker} {token:<20}")
+    @staticmethod
+    def print_attention_matrix(attention: np.ndarray, tokens: List[str], layer: int, head: int):
+        print(f"\n{'='*60}")
+        print(f"ATTENTION: Layer {layer+1}/12, Head {head+1}/12")
+        print(f"{'='*60}")
+        print(f"{'':15}", end='')
+        for token in tokens[:8]:
+            print(f"{token[:7]:^8}", end='')
+        if len(tokens) > 8:
+            print("...", end='')
         print()
-        print("-" * (15 + 10 * len(tokens)))
-        for i, from_token in enumerate(tokens):
-            print(f"{from_token[:12]:<15}", end='')
-            for j, attention_score in enumerate(attention[i]):
-                if attention_score > 0.1:
-                    print(f"\033[1m{attention_score:.4f}\033[0m    ", end='')
+        for i, from_token in enumerate(tokens[:8]):
+            print(f"{from_token[:12]:12}", end='')
+            for j in range(min(8, len(tokens))):
+                val = attention[i, j]
+                if val > 0.15:
+                    print(f"\033[1m{val:^8.3f}\033[0m", end='')
                 else:
-                    print(f"{attention_score:.4f}    ", end='')
+                    print(f"{val:^8.3f}", end='')
+            if len(tokens) > 8:
+                print("...", end='')
             print()
-        print(f"\nStatistics for Layer {layer+1}, Head {head+1}:")
-        print(f"Max attention: {np.max(attention):.4f}")
-        print(f"Mean attention: {np.mean(attention):.4f}")
-        print(f"Min attention: {np.min(attention):.4f}")
+        if len(tokens) > 8:
+            print("...")
+        print(f"\nStats: max={attention.max():.3f}, mean={attention.mean():.3f}")
 
-    def print_attention_summary(self, attention_data, include_special=False):
-        tokens = attention_data['tokens']
-        attention_weights = attention_data['attention']
-        attention_array = np.stack([layer.cpu().numpy() for layer in attention_weights])
-        attention_array = attention_array.squeeze(1)
-        if not include_special:
-            input_ids = attention_data['input_ids'].cpu().numpy()[0]
-            special_tokens = {101, 102, 0}
-            mask = ~np.isin(input_ids, list(special_tokens))
-            attention_array = attention_array[:, :, mask, :]
-            attention_array = attention_array[:, :, :, mask]
-        print("\n" + "="*60)
-        print("ATTENTION SUMMARY STATISTICS")
-        print("="*60)
-        max_attentions = np.max(attention_array, axis=(-1, -2))
-        avg_attentions = np.mean(attention_array, axis=(-1, -2))
-        print("\nMax attention weight per layer/head:")
-        print("-" * 40)
-        print("      ", end='')
-        for head in range(12):
-            print(f"Head{head+1:<2} ", end='')
-        print()
+    @staticmethod
+    def print_attention_patterns(data: AttentionData, token_idx: int):
+        token = data.tokens[token_idx]
+        print(f"\n{'='*60}")
+        print(f"ATTENTION TO: '{token}' (position {token_idx})")
+        print(f"{'='*60}")
+        all_layer_attention = []
         for layer in range(12):
-            print(f"L{layer+1:<2}: ", end='')
-            for head in range(12):
-                print(f"{max_attentions[layer, head]:.3f}  ", end='')
-            print()
-        print("\nAverage attention weight per layer/head:")
-        print("-" * 40)
-        print("      ", end='')
-        for head in range(12):
-            print(f"Head{head+1:<2} ", end='')
-        print()
-        for layer in range(12):
-            print(f"L{layer+1:<2}: ", end='')
-            for head in range(12):
-                print(f"{avg_attentions[layer, head]:.3f}  ", end='')
-            print()
-        print("\nOverall Statistics:")
-        print("-" * 40)
-        print(f"Global max attention: {np.max(attention_array):.4f}")
-        print(f"Global mean attention: {np.mean(attention_array):.4f}")
-        print(f"Global min attention: {np.min(attention_array):.4f}")
+            attention = data.attention_weights[layer][0].cpu().numpy()
+            avg_attention = attention[:, :, token_idx].mean(axis=0)
+            all_layer_attention.append(avg_attention)
+            print(f"\nLayer {layer+1}:")
+            top_indices = np.argsort(avg_attention)[-3:][::-1]
+            for idx in top_indices:
+                score = avg_attention[idx]
+                bar = '█' * int(score * 20)
+                print(f"  {data.tokens[idx]:15} {score:.3f} {bar}")
+        all_layer_attention = np.array(all_layer_attention)
+        mean_attention = all_layer_attention.mean(axis=0)
+        top_overall = np.argsort(mean_attention)[-3:][::-1]
+        print(f"\n{'='*40}")
+        print("TOP ATTENDING TOKENS (across all layers):")
+        for idx in top_overall:
+            score = mean_attention[idx]
+            print(f"  {data.tokens[idx]:15} {score:.3f}")
 
-    def analyze(self, text, layer=0, head=0, include_special=False):
-        print(f"\nAnalyzing: '{text}'")
-        print("="*60)
-        attention_data = self.get_attention_weights(text)
-        self.print_tokens(attention_data['tokens'])
-        self.print_attention_matrix(attention_data, layer, head, include_special)
-        self.print_attention_summary(attention_data, include_special)
-        return attention_data
+    @staticmethod
+    def print_attention_summary(data: AttentionData):
+        print(f"\n{'='*60}")
+        print("ATTENTION SUMMARY (all layers/heads)")
+        print(f"{'='*60}")
+        attention_stack = torch.stack(data.attention_weights).squeeze(1).cpu().numpy()
+        n_layers, n_heads = attention_stack.shape[:2]
+        max_per_head = attention_stack.max(axis=(-1, -2))
+        mean_per_head = attention_stack.mean(axis=(-1, -2))
+        print("\nMax attention per layer/head:")
+        print("     ", end='')
+        for h in range(min(n_heads, 8)):
+            print(f" H{h+1:<2d}", end='')
+        print("  ..." if n_heads > 8 else "")
+        for l in range(n_layers):
+            print(f"L{l+1:<2d}: ", end='')
+            for h in range(min(n_heads, 8)):
+                val = max_per_head[l, h]
+                if val > 0.5:
+                    print(f"\033[1m{val:5.2f}\033[0m", end='')
+                else:
+                    print(f"{val:5.2f}", end='')
+            print("  ..." if n_heads > 8 else "")
+        flat_idx = np.argmax(max_per_head)
+        max_layer, max_head = np.unravel_index(flat_idx, max_per_head.shape)
+        print(f"\nMost focused: Layer {max_layer+1}, Head {max_head+1} "
+              f"(max={max_per_head[max_layer, max_head]:.3f}")
+        entropy = -np.sum(attention_stack * np.log(attention_stack + 1e-9), axis=(-1, -2))
+        max_entropy_idx = np.argmax(entropy)
+        ent_layer, ent_head = np.unravel_index(max_entropy_idx, entropy.shape)
+        print(f"Most distributed: Layer {ent_layer+1}, Head {ent_head+1} "
+              f"(entropy={entropy[ent_layer, ent_head]:.3f}")
+        
+    @staticmethod
+    def print_head_comparison(data: AttentionData, layer: int, heads: List[int] = None):
+        if heads is None:
+            heads = [0, 1, 2]
+        print(f"\n{'='*60}")
+        print(f"HEAD COMPARISON: Layer {layer+1}, Heads {heads}")
+        print(f"{'='*60}")
+        n_tokens = min(8, len(data.tokens))
+        for i in range(n_tokens):
+            print(f"\nFrom '{data.tokens[i]}':")
+            for j in range(n_tokens):
+                if i == j:
+                    continue
+                scores = []
+                for h in heads:
+                    attention = data.attention_weights[layer][0, h, i, j].item()
+                    scores.append((h, attention))
+                scores.sort(key=lambda x: x[1], reverse=True)
+                if scores[0][1] > 0.1:
+                    print(f"  → '{data.tokens[j]:12}' : ", end='')
+                    for h, score in scores[:2]:
+                        print(f"H{h+1}={score:.2f} ", end='')
+                    print()
+
+class HeadAnalyzer:
+    def __init__(self, model: BertModel):
+        self.model = model
+        self.hidden_dim = model.config.hidden_size
+        self.num_heads = model.config.num_attention_heads
+        self.head_dim = self.hidden_dim // self.num_heads
+
+    def get_qkv_matrices(self, data: AttentionData, layer: int, head: int
+                        ) -> Dict[str, np.ndarray]:
+        hidden_state = data.hidden_states[layer]
+        attn_layer = self.model.encoder.layer[layer].attention.self
+        Q = attn_layer.query(hidden_state)
+        K = attn_layer.key(hidden_state)
+        V = attn_layer.value(hidden_state)
+        batch_size, seq_len = hidden_state.shape[:2]
+        for matrix, name in [(Q, 'Q'), (K, 'K'), (V, 'V')]:
+            matrix = matrix.view(batch_size, seq_len, self.num_heads, self.head_dim)
+            matrix = matrix.transpose(1, 2)
+            if name == 'Q':
+                Q = matrix
+            elif name == 'K':
+                K = matrix
+            else:
+                V = matrix
+        return {
+            'Q': Q[0, head].detach().cpu().numpy(),
+            'K': K[0, head].detach().cpu().numpy(),
+            'V': V[0, head].detach().cpu().numpy()
+        }
     
-    def analyze_multiple_layers(self, text, include_special=False):
-        print(f"\nAnalyzing: '{text}'")
-        print("="*60)
-        attention_data = self.get_attention_weights(text)
-        self.print_tokens(attention_data['tokens'])
-        print(f"\nShowing attention matrices for selected layers/heads (BERT-base: 12 layers, 12 heads)")
-        layer_head_pairs = [
-            (0, 0),
-            (5, 5),
-            (11, 11)
-        ]
-        for layer, head in layer_head_pairs:
-            self.print_attention_matrix(attention_data, layer, head, include_special)
-        self.print_attention_summary(attention_data, include_special)
-        return attention_data
-    
-    def visualize_specific_token_attention(self, text, token_index, layer=None, include_special=False):
-        attention_data = self.get_attention_weights(text)
-        tokens = attention_data['tokens']
-        self.print_tokens(tokens, highlight_index=token_index)
-        if token_index >= len(tokens):
-            print(f"\nError: Token index {token_index} out of range. Text has {len(tokens)} tokens.")
-            return
-        print(f"\n" + "="*60)
-        print(f"ATTENTION TO TOKEN: '{tokens[token_index]}' (index {token_index})")
-        print("="*60)
-        if layer is not None:
-            attention_layer = attention_data['attention'][layer][0].cpu().numpy()
-            avg_attention_to_token = np.mean(attention_layer[:, :, token_index], axis=0)
-            print(f"\nAverage attention from all tokens to '{tokens[token_index]}' (Layer {layer+1}):")
+    def print_head_analysis(self, data: AttentionData, layer: int, head: int):
+        qkv = self.get_qkv_matrices(data, layer, head)
+        print(f"\n{'='*60}")
+        print(f"HEAD INTERNALS: Layer {layer+1}, Head {head+1}")
+        print(f"{'='*60}")
+        print(f"Dimension: {self.head_dim} per head")
+        for matrix_name, matrix in qkv.items():
+            print(f"\n{matrix_name} Matrix (first 5 dims):")
             print("-" * 40)
-            for i, (token, score) in enumerate(zip(tokens, avg_attention_to_token)):
-                if score > 0.1:
-                    print(f"{i:<3} {token:<15} \033[1m{score:.4f}\033[0m {'*' * int(score * 50)}")
-                else:
-                    print(f"{i:<3} {token:<15} {score:.4f} {'*' * int(score * 50)}")
-        else:
-            print(f"\nAverage attention to '{tokens[token_index]}' across all 12 heads per layer:")
-            print("="*70)
-            print("Color coding: \033[1;32mGreen\033[0m = high (>0.15), \033[1mBold\033[0m = medium (>0.10), Normal = low")
-            print("="*70)
-            for layer_idx in range(12):
-                attention_layer = attention_data['attention'][layer_idx][0].cpu().numpy()
-                avg_attention_to_token = np.mean(attention_layer[:, :, token_index], axis=0)
-                print(f"\nLayer {layer_idx+1}:")
-                print("-" * 40)
-                for i, (token, score) in enumerate(zip(tokens, avg_attention_to_token)):
-                    if not include_special and token in ['[CLS]', '[SEP]', '[PAD]']:
-                        continue
-                    bar_length = int(score * 30)
-                    bar = '█' * bar_length
-                    if score > 0.15:
-                        print(f"{i:<3} {token:<15} \033[1;32m{score:.4f}\033[0m {bar}")
-                    elif score > 0.10:
-                        print(f"{i:<3} {token:<15} \033[1m{score:.4f}\033[0m {bar}")
-                    else:
-                        print(f"{i:<3} {token:<15} {score:.4f} {bar}")
-                max_idx = np.argmax(avg_attention_to_token)
-                print(f" Highest: {tokens[max_idx]} ({avg_attention_to_token[max_idx]:.4f})")
-                print(f" Average: {np.mean(avg_attention_to_token):.4f}")
-            print("\n" + "="*70)
-            print("SUMMARY ACROSS ALL LAYERS:")
-            print("="*70)
-            all_layer_attention = []
-            for layer_idx in range(12):
-                attention_layer = attention_data['attention'][layer_idx][0].cpu().numpy()
-                avg_attention = np.mean(attention_layer[:, :, token_index], axis=0)
-                all_layer_attention.append(avg_attention)
-            all_layer_attention = np.array(all_layer_attention)
-            mean_attention_per_token = np.mean(all_layer_attention, axis=0)
-            sorted_indices = np.argsort(mean_attention_per_token)[::-1]
-            print(f"\nTokens with highest average attention to '{tokens[token_index]}' across all layers:")
-            print("-" * 50)
-            for idx in sorted_indices[:5]:
-                score = mean_attention_per_token[idx]
-                print(f"{tokens[idx]:<15} {score:.4f} {'█' * int(score * 30)}")
-            print(f"\n\nLayer-by-layer attention progression for top token '{tokens[sorted_indices[0]]}':")
-            print("-" * 50)
-            print("Layer:  ", end='')
-            for i in range(12):
-                print(f"{i+1:>5}", end='')
-            print("\nScore:  ", end='')
-            for i in range(12):
-                score = all_layer_attention[i][sorted_indices[0]]
-                print(f"{score:>5.3f}", end='')
-            print()
-
-    def format_vector_dimensions(self, vector, dims_per_line=8, precision=2):
-        lines = []
-        for i in range(0, len(vector), dims_per_line):
-            chunk = vector[i:i+dims_per_line]
-            formatted_values = [f"{val:>{precision+4}.{precision}f}" for val in chunk]
-            line = f"  [{i:3d}-{min(i+dims_per_line-1, len(vector)-1):3d}]: " + " ".join(formatted_values)
-            lines.append(line)
-        return "\n".join(lines)
-
-    def examine_attention_head_internals(self, text, layer=0, head=0, show_dimensions='all'):
-        print(f"\nExamining internals of Layer {layer+1}, Head {head+1}")
-        print("="*70)
-        attention_data = self.get_attention_weights(text)
-        tokens = attention_data['tokens']
-        hidden_states = attention_data['hidden_states']
-        layer_input = hidden_states[layer]
-        attention_layer = self.model.encoder.layer[layer].attention.self
-        hidden_dim = self.model.config.hidden_size
-        num_heads = self.model.config.num_attention_heads
-        head_dim = hidden_dim // num_heads
-        
-        Q = attention_layer.query(layer_input)
-        K = attention_layer.key(layer_input)
-        V = attention_layer.value(layer_input)
-        batch_size, seq_len = layer_input.shape[:2]
-        Q = Q.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
-        K = K.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
-        V = V.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
-        
-        Q_head = Q[0, head].detach().cpu().numpy()
-        K_head = K[0, head].detach().cpu().numpy()
-        V_head = V[0, head].detach().cpu().numpy()
-        
-        scores = np.matmul(Q_head, K_head.T) / np.sqrt(head_dim)
-        attention_probs = torch.nn.functional.softmax(torch.tensor(scores), dim=-1).numpy()
-        
-        if show_dimensions == 'all':
-            dims_to_show = head_dim
-            dims_label = f"all {head_dim} dimensions"
-        else:
-            dims_to_show = min(show_dimensions, head_dim)
-            dims_label = f"first {dims_to_show} dimensions"
-        
-        print(f"\nEach attention head has {head_dim} dimensions (768 total / 12 heads)")
-        print(f"Showing: {dims_label}")
-        
-        print("\n" + "="*70)
-        print(f"QUERY (Q) MATRIX - Shape: {Q_head.shape}")
-        print("="*70)
-        for i, token in enumerate(tokens):
-            norm = np.linalg.norm(Q_head[i])
-            print(f"\nToken {i}: '{token}' (||Q||={norm:.2f})")
-            if show_dimensions == 'all':
-                print(self.format_vector_dimensions(Q_head[i]))
-            else:
-                values = " ".join([f"{val:>5.2f}" for val in Q_head[i][:dims_to_show]])
-                print(f"  {values}")
-                if dims_to_show < head_dim:
-                    print(f"  ... ({head_dim - dims_to_show} more dimensions)")
-        
-        print("\n" + "="*70)
-        print(f"KEY (K) MATRIX - Shape: {K_head.shape}")
-        print("="*70)
-        for i, token in enumerate(tokens):
-            norm = np.linalg.norm(K_head[i])
-            print(f"\nToken {i}: '{token}' (||K||={norm:.2f})")
-            if show_dimensions == 'all':
-                print(self.format_vector_dimensions(K_head[i]))
-            else:
-                values = " ".join([f"{val:>5.2f}" for val in K_head[i][:dims_to_show]])
-                print(f"  {values}")
-                if dims_to_show < head_dim:
-                    print(f"  ... ({head_dim - dims_to_show} more dimensions)")
-        
-        print("\n" + "="*70)
-        print(f"VALUE (V) MATRIX - Shape: {V_head.shape}")
-        print("="*70)
-        for i, token in enumerate(tokens):
-            norm = np.linalg.norm(V_head[i])
-            print(f"\nToken {i}: '{token}' (||V||={norm:.2f})")
-            if show_dimensions == 'all':
-                print(self.format_vector_dimensions(V_head[i]))
-            else:
-                values = " ".join([f"{val:>5.2f}" for val in V_head[i][:dims_to_show]])
-                print(f"  {values}")
-                if dims_to_show < head_dim:
-                    print(f"  ... ({head_dim - dims_to_show} more dimensions)")
-        
-        print("\n" + "="*70)
-        print("Q-K SIMILARITY MATRIX (before softmax)")
-        print("="*70)
-        print("This shows Q[i] · K[j] / sqrt(d_k) for each token pair:")
-        print("-"*70)
-        print(f"{'From/To':<15}", end='')
-        for token in tokens[:6]:
-            print(f"{token[:8]:<10}", end='')
-        print("...")
-        print("-" * 70)
-        for i, from_token in enumerate(tokens[:6]):
-            print(f"{from_token[:12]:<15}", end='')
-            for j in range(min(6, len(tokens))):
-                score = scores[i, j]
-                if score > 2.0:
-                    print(f"\033[1;32m{score:>8.3f}\033[0m  ", end='')
-                elif score > 0:
-                    print(f"{score:>8.3f}  ", end='')
-                else:
-                    print(f"\033[90m{score:>8.3f}\033[0m  ", end='')
+            for i, token in enumerate(data.tokens[:5]):
+                values = matrix[i, :5]
+                norm = np.linalg.norm(matrix[i])
+                print(f"{token:12} [{values[0]:5.2f} {values[1]:5.2f} {values[2]:5.2f} "
+                      f"{values[3]:5.2f} {values[4]:5.2f}...] ||{matrix_name}||={norm:.2f}")
+        scores = np.matmul(qkv['Q'], qkv['K'].T) / np.sqrt(self.head_dim)
+        attention_weights = data.attention_weights[layer][0, head].cpu().numpy()
+        print(f"\nPre-softmax scores (Q·K^T/√d):")
+        print("-" * 40)
+        for i in range(min(5, len(data.tokens))):
+            print(f"{data.tokens[i]:12}", end='')
+            for j in range(min(5, len(data.tokens))):
+                print(f"{scores[i,j]:6.2f}", end='')
             print("...")
-        if len(tokens) > 6:
+        print(f"\nPost-softmax attention (from model):")
+        print("-" * 40)
+        for i in range(min(5, len(data.tokens))):
+            print(f"{data.tokens[i]:12}", end='')
+            for j in range(min(5, len(data.tokens))):
+                val = attention_weights[i,j]
+                if val > 0.1:
+                    print(f"\033[1m{val:6.3f}\033[0m", end='')
+                else:
+                    print(f"{val:6.3f}", end='')
             print("...")
-        
-        print("\n" + "="*70)
-        print("ATTENTION OUTPUT COMPUTATION")
-        print("="*70)
-        print("Attention(Q,K,V) = softmax(QK^T/√d_k)V")
-        print("\nFor each token, the output is a weighted sum of all value vectors,")
-        print("where weights come from the softmax of query-key similarities.")
-        
-        attention_output = np.matmul(attention_probs, V_head)
-        print(f"\nOutput vectors ({dims_label}):")
-        print("-"*70)
-        for i in range(min(5, len(tokens))):
-            token = tokens[i]
-            norm = np.linalg.norm(attention_output[i])
-            print(f"\nToken {i}: '{token}' (||O||={norm:.2f})")
-            if show_dimensions == 'all':
-                print(self.format_vector_dimensions(attention_output[i]))
-            else:
-                values = " ".join([f"{val:>5.2f}" for val in attention_output[i][:dims_to_show]])
-                print(f"  {values}")
-                if dims_to_show < head_dim:
-                    print(f"  ... ({head_dim - dims_to_show} more dimensions)")
-        
-        print("\n" + "="*70)
-        print("VECTOR STATISTICS")
-        print("="*70)
-        
-        def avg_cosine_sim(matrix):
-            normalized = matrix / (np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-8)
+        print(f"\nVector Similarities:")
+        print("-" * 40)
+        for name, matrix in qkv.items():
+            norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+            normalized = matrix / (norms + 1e-8)
             sim_matrix = np.matmul(normalized, normalized.T)
-            mask = ~np.eye(len(matrix), dtype=bool)
-            return np.mean(sim_matrix[mask])
-        
-        print(f"\nAverage cosine similarity between tokens:")
-        print(f" Query vectors: {avg_cosine_sim(Q_head):.3f}")
-        print(f" Key vectors: {avg_cosine_sim(K_head):.3f}")
-        print(f" Value vectors: {avg_cosine_sim(V_head):.3f}")
-        
-        for name, matrix in [("Query", Q_head), ("Key", K_head), ("Value", V_head)]:
-            normalized = matrix / (np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-8)
-            sim_matrix = np.matmul(normalized, normalized.T)
-            np.fill_diagonal(sim_matrix, 0)
-            avg_sims = np.mean(sim_matrix, axis=1)
-            most_unique_idx = np.argmin(avg_sims)
-            print(f"\nMost unique {name} vector: '{tokens[most_unique_idx]}' (avg similarity: {avg_sims[most_unique_idx]:.3f})")
-        
-        print("\n" + "="*70)
-        print("DIMENSION-WISE STATISTICS")
-        print("="*70)
-        
-        for name, matrix in [("Query", Q_head), ("Key", K_head), ("Value", V_head)]:
-            print(f"\n{name} dimensions with highest variance:")
-            variances = np.var(matrix, axis=0)
-            top_var_dims = np.argsort(variances)[-5:][::-1]
-            for dim in top_var_dims:
-                print(f"  Dim {dim}: variance={variances[dim]:.4f}, range=[{np.min(matrix[:, dim]):.2f}, {np.max(matrix[:, dim]):.2f}]")
+            np.fill_diagonal(sim_matrix, -1)
+            max_sim_idx = np.unravel_index(np.argmax(sim_matrix), sim_matrix.shape)
+            max_sim = sim_matrix[max_sim_idx]
+            print(f"{name}: Most similar pair = "
+                  f"'{data.tokens[max_sim_idx[0]]}' & '{data.tokens[max_sim_idx[1]]}' "
+                  f"(cos={max_sim:.3f})")
+        print(f"\nDimension Statistics:")
+        print("-" * 40)
+        for name, matrix in qkv.items():
+            var_per_dim = np.var(matrix, axis=0)
+            top_var_dims = np.argsort(var_per_dim)[-3:][::-1]
+            print(f"{name}: Most variable dims = {top_var_dims[0]}, {top_var_dims[1]}, {top_var_dims[2]} "
+                  f"(var={var_per_dim[top_var_dims[0]]:.3f}, "
+                  f"{var_per_dim[top_var_dims[1]]:.3f}, "
+                  f"{var_per_dim[top_var_dims[2]]:.3f})")
 
 def main():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument('--text', type=str, required=True,
-                        help='Input text to analyze')
-    parser.add_argument('--layer', type=int, default=None,
-                        help='Layer index to visualize (0-11 for BERT-base). For --focus-token, omit to see all layers')
-    parser.add_argument('--head', type=int, default=0,
-                        help='Attention head index to visualize (0-11 for BERT-base)')
+    parser.add_argument('text', help='Text to analyze')
+    parser.add_argument('-l', '--layer', type=int, default=0,
+                        help='Layer index (0-11)')
+    parser.add_argument('-H', '--head', type=int, default=0,
+                        help='Head index (0-11)')
+    parser.add_argument('--tokens', action='store_true',
+                        help='Show only tokenization')
+    parser.add_argument('--matrix', action='store_true',
+                        help='Show attention matrix')
+    parser.add_argument('--focus', type=int, metavar='TOKEN_IDX',
+                        help='Show attention to specific token')
+    parser.add_argument('--internals', action='store_true',
+                        help='Show head internals (Q/K/V)')
+    parser.add_argument('--summary', action='store_true',
+                        help='Show summary across all layers/heads')
+    parser.add_argument('--compare-heads', nargs='*', type=int, metavar='HEAD',
+                        help='Compare multiple heads in a layer')
     parser.add_argument('--include-special', action='store_true',
-                        help='Include [CLS], [SEP], and [PAD] tokens in visualization')
-    parser.add_argument('--all-layers', action='store_true',
-                        help='Show attention for multiple layers')
-    parser.add_argument('--focus-token', type=int, default=None,
-                        help='Show attention to a specific token index. Shows all 12 layers by default, or specific layer if --layer is used')
-    parser.add_argument('--examine-head', action='store_true',
-                        help='Deep dive into Q/K/V matrices of a specific attention head')
-    parser.add_argument('--show-tokens-only', action='store_true',
-                        help='Only show tokenization with indices (useful for finding token positions)')
-    parser.add_argument('--show-all-dims', action='store_true',
-                        help='Show all 64 dimensions per head instead of just first 10 (only with --examine-head)')
-    parser.add_argument('--show-dims', type=int, default=10,
-                        help='Number of dimensions to show (default: 10, use with --examine-head)')
+                        help='Include special tokens ([CLS], [SEP])')
+    parser.add_argument('--model', default='bert-base-uncased',
+                        help='Model name (default: bert-base-uncased)')
     args = parser.parse_args()
-    
-    if args.layer is not None and (args.layer < 0 or args.layer > 11):
-        print("Error: Layer must be between 0 and 11 for BERT-base")
-        return
-    if args.head < 0 or args.head > 11:
-        print("Error: Head must be between 0 and 11 for BERT-base")
-        return
-    
-    analyzer = BERTAttentionAnalyzer()
-    
-    if args.show_tokens_only:
-        attention_data = analyzer.get_attention_weights(args.text)
-        analyzer.print_tokens(attention_data['tokens'])
-        return
-    
-    if args.focus_token is not None:
-        analyzer.visualize_specific_token_attention(args.text, args.focus_token, args.layer, args.include_special)
-    elif args.examine_head:
-        layer = args.layer if args.layer is not None else 0
-        if args.show_all_dims:
-            analyzer.examine_attention_head_internals(args.text, layer, args.head, show_dimensions='all')
+    visualizer = BERTAttentionVisualizer(args.model)
+    formatter = AttentionFormatter()
+    data = visualizer.analyze_text(args.text)
+    if args.tokens:
+        formatter.print_tokens(data.tokens)
+    elif args.focus is not None:
+        if 0 <= args.focus < len(data.tokens):
+            formatter.print_tokens(data.tokens, highlight_idx=args.focus)
+            formatter.print_attention_patterns(data, args.focus)
         else:
-            analyzer.examine_attention_head_internals(args.text, layer, args.head, show_dimensions=args.show_dims)
-    elif args.all_layers:
-        analyzer.analyze_multiple_layers(args.text, args.include_special)
+            print(f"Error: Token index {args.focus} out of range (0-{len(data.tokens)-1})")
+    elif args.internals:
+        analyzer = HeadAnalyzer(visualizer.model)
+        analyzer.print_head_analysis(data, args.layer, args.head)
+    elif args.summary:
+        formatter.print_attention_summary(data)
+    elif args.compare_heads is not None:
+        heads = args.compare_heads if args.compare_heads else None
+        formatter.print_head_comparison(data, args.layer, heads)
     else:
-        layer = args.layer if args.layer is not None else 0
-        analyzer.analyze(args.text, layer, args.head, args.include_special)
-        
+        attention, tokens = visualizer.get_attention_matrix(
+            data, args.layer, args.head, not args.include_special
+        )
+        formatter.print_attention_matrix(attention, tokens, args.layer, args.head)
+
 if __name__ == "__main__":
     main()
