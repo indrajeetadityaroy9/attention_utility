@@ -22,8 +22,6 @@ class BERTAttentionAnalyzer:
         )
         self.model = self.model.to(device)
         self.model.eval()
-        print("Model architecture: 12 layers, 12 attention heads, 768 hidden dimensions")
-        print("\nNote: BERT adds [CLS] at start (index 0) and [SEP] at end of your text")
 
     def get_attention_weights(self, text):
         inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True)
@@ -52,7 +50,6 @@ class BERTAttentionAnalyzer:
                 print(f"\033[1;32m{i:<10} {token:<20} {marker:<15} ← FOCUS TOKEN\033[0m")
             else:
                 print(f"{i:<10} {token:<20} {marker:<15}")
-        print("\nTip: Use --focus-token INDEX to analyze attention to any specific token")
 
     def print_attention_matrix(self, attention_data, layer=0, head=0, include_special=False):
         tokens = attention_data['tokens']
@@ -81,9 +78,9 @@ class BERTAttentionAnalyzer:
                     print(f"{attention_score:.4f}    ", end='')
             print()
         print(f"\nStatistics for Layer {layer+1}, Head {head+1}:")
-        print(f"  Max attention: {np.max(attention):.4f}")
-        print(f"  Mean attention: {np.mean(attention):.4f}")
-        print(f"  Min attention: {np.min(attention):.4f}")
+        print(f"Max attention: {np.max(attention):.4f}")
+        print(f"Mean attention: {np.mean(attention):.4f}")
+        print(f"Min attention: {np.min(attention):.4f}")
 
     def print_attention_summary(self, attention_data, include_special=False):
         tokens = attention_data['tokens']
@@ -160,7 +157,6 @@ class BERTAttentionAnalyzer:
         self.print_tokens(tokens, highlight_index=token_index)
         if token_index >= len(tokens):
             print(f"\nError: Token index {token_index} out of range. Text has {len(tokens)} tokens.")
-            print("Remember: Index 0 is [CLS], your first word starts at index 1")
             return
         print(f"\n" + "="*60)
         print(f"ATTENTION TO TOKEN: '{tokens[token_index]}' (index {token_index})")
@@ -227,7 +223,6 @@ class BERTAttentionAnalyzer:
             print()
 
     def format_vector_dimensions(self, vector, dims_per_line=8, precision=2):
-        """Format a vector showing all dimensions with line wrapping."""
         lines = []
         for i in range(0, len(vector), dims_per_line):
             chunk = vector[i:i+dims_per_line]
@@ -270,7 +265,7 @@ class BERTAttentionAnalyzer:
             dims_to_show = min(show_dimensions, head_dim)
             dims_label = f"first {dims_to_show} dimensions"
         
-        print(f"\nNote: Each attention head has {head_dim} dimensions (768 total / 12 heads)")
+        print(f"\nEach attention head has {head_dim} dimensions (768 total / 12 heads)")
         print(f"Showing: {dims_label}")
         
         print("\n" + "="*70)
@@ -372,9 +367,9 @@ class BERTAttentionAnalyzer:
             return np.mean(sim_matrix[mask])
         
         print(f"\nAverage cosine similarity between tokens:")
-        print(f"  Query vectors:  {avg_cosine_sim(Q_head):.3f}")
-        print(f"  Key vectors:    {avg_cosine_sim(K_head):.3f}")
-        print(f"  Value vectors:  {avg_cosine_sim(V_head):.3f}")
+        print(f" Query vectors: {avg_cosine_sim(Q_head):.3f}")
+        print(f" Key vectors: {avg_cosine_sim(K_head):.3f}")
+        print(f" Value vectors: {avg_cosine_sim(V_head):.3f}")
         
         for name, matrix in [("Query", Q_head), ("Key", K_head), ("Value", V_head)]:
             normalized = matrix / (np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-8)
