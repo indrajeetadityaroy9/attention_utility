@@ -2,8 +2,10 @@ import torch
 import numpy as np
 from transformers import BertTokenizer, BertModel
 import argparse
+import json
+import csv
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Any
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -13,6 +15,7 @@ class AttentionData:
     attention_weights: Tuple[torch.Tensor]
     hidden_states: Tuple[torch.Tensor]
     input_ids: torch.Tensor
+    text: str = ""  # Store original text for reference
 
 class BERTAttentionVisualizer:
     def __init__(self, model_name: str = "bert-base-uncased"):
@@ -40,7 +43,8 @@ class BERTAttentionVisualizer:
             tokens=tokens,
             attention_weights=outputs.attentions,
             hidden_states=outputs.hidden_states,
-            input_ids=inputs['input_ids']
+            input_ids=inputs['input_ids'],
+            text=text
         )
     def get_attention_matrix(self, data: AttentionData, layer: int, head: int, exclude_special: bool = True) -> Tuple[np.ndarray, List[str]]:
         attention = data.attention_weights[layer][0, head].cpu().numpy()
@@ -74,6 +78,65 @@ class AttentionFormatter:
                 print(f"\033[92m{i:3d} {marker} {token:<20} ← TARGET\033[0m")
             else:
                 print(f"{i:3d} {marker} {token:<20}")
+                
+    @staticmethod
+    def print_detailed_attention_weights(data: AttentionData, layer: Optional[int] = None, 
+                                        head: Optional[int] = None) -> Dict[str, Any]:
+        """Print all attention weights with detailed position information"""
+        output = {}
+        layers = [layer] if layer is not None else range(len(data.attention_weights))
+        
+        for l in layers:
+            output[f'layer_{l}'] = {}
+            heads = [head] if head is not None else range(data.attention_weights[l].size(1))
+            
+            for h in heads:
+                attention = data.attention_weights[l][0, h].cpu().numpy()
+                output[f'layer_{l}'][f'head_{h}'] = {
+                    'matrix': attention.tolist(),
+                    'tokens': data.tokens,
+                    'shape': attention.shape
+                }
+                
+                print(f"\n{'='*80}")
+                print(f"LAYER {l+1}, HEAD {h+1}")
+                print(f"{'='*80}")
+                print(f"Shape: {attention.shape}")
+                print(f"Min: {attention.min():.6f}, Max: {attention.max():.6f}, Mean: {attention.mean():.6f}")
+                
+                # Print detailed matrix with positions
+                print(f"\nPosition-wise attention weights:")
+                header_label = "From\\To"
+                print(f"{header_label:<8}", end="")
+                for j, to_token in enumerate(data.tokens):
+                    print(f"{j:6d}", end="")
+                print()
+                
+                for i, from_token in enumerate(data.tokens):
+                    print(f"{i:3d} {from_token[:4]:4}", end="")
+                    for j in range(len(data.tokens)):
+                        val = attention[i, j]
+                        print(f"{val:6.3f}", end="")
+                    print()
+                    
+                # Sparsity analysis
+                zero_weights = np.sum(attention < 1e-6)
+                total_weights = attention.size
+                sparsity = zero_weights / total_weights
+                print(f"\nSparsity analysis:")
+                print(f"  Zero weights: {zero_weights}/{total_weights} ({sparsity*100:.2f}%)")
+                
+                # Top attention weights
+                flat_indices = np.argsort(attention.flatten())[-10:][::-1]
+                top_weights = [(divmod(idx, attention.shape[1]), attention.flatten()[idx]) 
+                              for idx in flat_indices]
+                
+                print(f"\nTop 10 attention weights:")
+                for (i, j), weight in top_weights:
+                    print(f"  {i:2d} → {j:2d} : {weight:.6f} ({data.tokens[i]} → {data.tokens[j]})")
+        
+        return output
+
     @staticmethod
     def print_attention_matrix(attention: np.ndarray, tokens: List[str], layer: int, head: int):
         print(f"\n{'='*60}")
@@ -213,6 +276,123 @@ class HeadAnalyzer:
             'V': V[0, head].detach().cpu().numpy()
         }
     
+    def print_detailed_head_analysis(self, data: AttentionData, layer: int, head: int):
+        """Enhanced head analysis with detailed value enumeration"""
+        qkv = self.get_qkv_matrices(data, layer, head)
+        print(f"\n{'='*80}")
+        print(f"DETAILED HEAD ANALYSIS: Layer {layer+1}, Head {head+1}")
+        print(f"{'='*80}")
+        print(f"Dimension: {self.head_dim} per head")
+        
+        # Detailed QKV matrices with position indices
+        for matrix_name, matrix in qkv.items():
+            print(f"\n{matrix_name} Matrix (all dimensions):")
+            print("-" * 60)
+            print(f"{'Token':<15} {'Vector Values (first 10)':<50} ||{matrix_name}||")
+            for i, token in enumerate(data.tokens):
+                values = matrix[i]
+                norm = np.linalg.norm(values)
+                values_str = " ".join([f"{v:6.3f}" for v in values[:10]])
+                print(f"{token:<15} {values_str:<50} {norm:.3f}")
+                
+        # Pre-softmax scores with detailed position information
+        scores = np.matmul(qkv['Q'], qkv['K'].T) / np.sqrt(self.head_dim)
+        attention_weights = data.attention_weights[layer][0, head].cpu().numpy()
+        
+        print(f"\nPre-softmax scores (Q·K^T/√d):")
+        print("-" * 60)
+        header_label = "From\\To"
+        print(f"{header_label:<15}", end="")
+        for j, to_token in enumerate(data.tokens):
+            print(f"{j:8d}", end="")
+        print()
+        
+        for i, from_token in enumerate(data.tokens):
+            print(f"{i:3d} {from_token:<11}", end='')
+            for j in range(len(data.tokens)):
+                print(f"{scores[i,j]:8.3f}", end='')
+            print()
+            
+        # Post-softmax attention with detailed position information
+        print(f"\nPost-softmax attention (from model):")
+        print("-" * 60)
+        print(f"{header_label:<15}", end="")
+        for j, to_token in enumerate(data.tokens):
+            print(f"{j:8d}", end="")
+        print()
+        
+        for i, from_token in enumerate(data.tokens):
+            print(f"{i:3d} {from_token:<11}", end='')
+            for j in range(len(data.tokens)):
+                val = attention_weights[i,j]
+                if val > 0.1:
+                    print(f"\033[1m{val:8.3f}\033[0m", end='')
+                else:
+                    print(f"{val:8.3f}", end='')
+            print()
+            
+        # Vector similarities with detailed information
+        print(f"\nVector Similarities:")
+        print("-" * 60)
+        for name, matrix in qkv.items():
+            norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+            normalized = matrix / (norms + 1e-8)
+            sim_matrix = np.matmul(normalized, normalized.T)
+            np.fill_diagonal(sim_matrix, -1)
+            
+            print(f"\n{name} Vector Cosine Similarities:")
+            print(f"{'Token1':<15} {'Token2':<15} {'Cosine Similarity'}")
+            # Get top 10 similar pairs
+            flat_indices = np.argsort(sim_matrix.flatten())[-11:][::-1]  # -11 to exclude diagonal
+            similar_pairs = [(divmod(idx, sim_matrix.shape[1]), sim_matrix.flatten()[idx]) 
+                            for idx in flat_indices]
+            
+            for (i, j), similarity in similar_pairs:
+                if i != j:  # Skip diagonal
+                    print(f"{data.tokens[i]:<15} {data.tokens[j]:<15} {similarity:.6f}")
+                    
+        # Dimension statistics with detailed information
+        print(f"\nDimension Statistics:")
+        print("-" * 60)
+        for name, matrix in qkv.items():
+            mean_per_dim = np.mean(matrix, axis=0)
+            var_per_dim = np.var(matrix, axis=0)
+            std_per_dim = np.std(matrix, axis=0)
+            
+            # Top variance dimensions
+            top_var_dims = np.argsort(var_per_dim)[-5:][::-1]
+            print(f"\n{name} Matrix Dimension Analysis:")
+            print(f"{'Dim':<5} {'Mean':<10} {'Variance':<10} {'Std Dev':<10}")
+            for dim in top_var_dims:
+                print(f"{dim:<5} {mean_per_dim[dim]:<10.6f} {var_per_dim[dim]:<10.6f} {std_per_dim[dim]:<10.6f}")
+                
+        # Attention sparsity analysis
+        flat_attention = attention_weights.flatten()
+        zero_weights = np.sum(flat_attention < 1e-6)
+        total_weights = flat_attention.size
+        sparsity = zero_weights / total_weights
+        
+        print(f"\nAttention Sparsity Analysis:")
+        print("-" * 60)
+        print(f"Zero weights: {zero_weights}/{total_weights} ({sparsity*100:.2f}%)")
+        print(f"Non-zero weights: {total_weights - zero_weights}")
+        print(f"Min attention weight: {flat_attention.min():.6f}")
+        print(f"Max attention weight: {flat_attention.max():.6f}")
+        print(f"Mean attention weight: {flat_attention.mean():.6f}")
+        print(f"Median attention weight: {np.median(flat_attention):.6f}")
+        
+        # Value enumeration for all attention weights
+        print(f"\nValue Enumeration (sorted by magnitude):")
+        print("-" * 60)
+        sorted_indices = np.argsort(flat_attention)[::-1]  # Descending order
+        print(f"{'Rank':<6} {'From':<6} {'To':<6} {'Weight':<10} {'Tokens'}")
+        for i, idx in enumerate(sorted_indices[:20]):  # Top 20
+            from_idx, to_idx = divmod(idx, attention_weights.shape[1])
+            weight = flat_attention[idx]
+            from_token = data.tokens[from_idx]
+            to_token = data.tokens[to_idx]
+            print(f"{i+1:<6} {from_idx:<6} {to_idx:<6} {weight:<10.6f} {from_token} → {to_token}")
+
     def print_head_analysis(self, data: AttentionData, layer: int, head: int):
         qkv = self.get_qkv_matrices(data, layer, head)
         print(f"\n{'='*60}")
@@ -231,11 +411,11 @@ class HeadAnalyzer:
         attention_weights = data.attention_weights[layer][0, head].cpu().numpy()
         print(f"\nPre-softmax scores (Q·K^T/√d):")
         print("-" * 40)
-        for i in range(min(5, len(data.tokens))):
-            print(f"{data.tokens[i]:12}", end='')
-            for j in range(min(5, len(data.tokens))):
-                print(f"{scores[i,j]:6.2f}", end='')
-            print("...")
+        header_label = "From\To"
+        print(f"{header_label:<12}", end='')
+        for j in range(min(5, len(data.tokens))):
+            print(f"{j:6d}", end='')
+        print("...")
         print(f"\nPost-softmax attention (from model):")
         print("-" * 40)
         for i in range(min(5, len(data.tokens))):
@@ -269,6 +449,88 @@ class HeadAnalyzer:
                   f"{var_per_dim[top_var_dims[1]]:.3f}, "
                   f"{var_per_dim[top_var_dims[2]]:.3f})")
 
+class DataExporter:
+    """Export attention data in various formats for compression and pruning analysis"""
+    
+    @staticmethod
+    def export_to_json(data: AttentionData, filepath: str):
+        """Export all attention data to JSON format"""
+        export_data = {
+            'text': data.text,
+            'tokens': data.tokens,
+            'attention_weights': [],
+            'hidden_states': []
+        }
+        
+        # Export attention weights for all layers and heads
+        for layer_idx, layer_weights in enumerate(data.attention_weights):
+            layer_data = {
+                'layer': layer_idx,
+                'heads': []
+            }
+            for head_idx in range(layer_weights.size(1)):  # Number of heads
+                head_data = {
+                    'head': head_idx,
+                    'attention_matrix': layer_weights[0, head_idx].cpu().numpy().tolist()
+                }
+                layer_data['heads'].append(head_data)
+            export_data['attention_weights'].append(layer_data)
+            
+        # Export hidden states
+        for layer_idx, hidden_state in enumerate(data.hidden_states):
+            export_data['hidden_states'].append({
+                'layer': layer_idx,
+                'hidden_state': hidden_state[0].cpu().numpy().tolist()  # First batch item
+            })
+            
+        with open(filepath, 'w') as f:
+            json.dump(export_data, f, indent=2)
+        print(f"Exported attention data to {filepath}")
+        
+    @staticmethod
+    def export_attention_to_csv(data: AttentionData, filepath: str, 
+                               layer: Optional[int] = None, head: Optional[int] = None):
+        """Export attention weights to CSV format"""
+        layers = [layer] if layer is not None else range(len(data.attention_weights))
+        
+        with open(filepath, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            
+            # Write header
+            header = ['layer', 'head', 'from_token_idx', 'to_token_idx', 'from_token', 'to_token', 'attention_weight']
+            writer.writerow(header)
+            
+            # Write data
+            for l in layers:
+                heads = [head] if head is not None else range(data.attention_weights[l].size(1))
+                for h in heads:
+                    attention = data.attention_weights[l][0, h].cpu().numpy()
+                    for i, from_token in enumerate(data.tokens):
+                        for j, to_token in enumerate(data.tokens):
+                            writer.writerow([l, h, i, j, from_token, to_token, attention[i, j]])
+                            
+        print(f"Exported attention weights to {filepath}")
+        
+    @staticmethod
+    def export_sparsity_analysis(data: AttentionData, filepath: str):
+        """Export sparsity analysis for all attention heads"""
+        with open(filepath, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['layer', 'head', 'total_weights', 'zero_weights', 'sparsity_ratio'])
+            
+            for layer_idx, layer_weights in enumerate(data.attention_weights):
+                for head_idx in range(layer_weights.size(1)):
+                    attention = layer_weights[0, head_idx].cpu().numpy()
+                    flat_attention = attention.flatten()
+                    total_weights = flat_attention.size
+                    zero_weights = np.sum(flat_attention < 1e-6)
+                    sparsity = zero_weights / total_weights
+                    
+                    writer.writerow([layer_idx, head_idx, total_weights, zero_weights, sparsity])
+                    
+        print(f"Exported sparsity analysis to {filepath}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter
@@ -286,6 +548,8 @@ def main():
                         help='Show attention to specific token')
     parser.add_argument('--internals', action='store_true',
                         help='Show head internals (Q/K/V)')
+    parser.add_argument('--detailed-internals', action='store_true',
+                        help='Show detailed head internals with value enumeration')
     parser.add_argument('--summary', action='store_true',
                         help='Show summary across all layers/heads')
     parser.add_argument('--compare-heads', nargs='*', type=int, metavar='HEAD',
@@ -294,6 +558,14 @@ def main():
                         help='Include special tokens ([CLS], [SEP])')
     parser.add_argument('--model', default='bert-base-uncased',
                         help='Model name (default: bert-base-uncased)')
+    parser.add_argument('--export-json', metavar='FILE',
+                        help='Export all attention data to JSON file')
+    parser.add_argument('--export-csv', metavar='FILE',
+                        help='Export attention weights to CSV file')
+    parser.add_argument('--export-sparsity', metavar='FILE',
+                        help='Export sparsity analysis to CSV file')
+    parser.add_argument('--detailed-weights', action='store_true',
+                        help='Show detailed attention weights with position indices')
     args = parser.parse_args()
     visualizer = BERTAttentionVisualizer(args.model)
     formatter = AttentionFormatter()
@@ -306,19 +578,34 @@ def main():
             formatter.print_attention_patterns(data, args.focus)
         else:
             print(f"Error: Token index {args.focus} out of range (0-{len(data.tokens)-1})")
+    elif args.detailed_weights:
+        formatter.print_detailed_attention_weights(data, args.layer, args.head)
     elif args.internals:
         analyzer = HeadAnalyzer(visualizer.model)
         analyzer.print_head_analysis(data, args.layer, args.head)
+    elif args.detailed_internals:
+        analyzer = HeadAnalyzer(visualizer.model)
+        analyzer.print_detailed_head_analysis(data, args.layer, args.head)
     elif args.summary:
         formatter.print_attention_summary(data)
     elif args.compare_heads is not None:
         heads = args.compare_heads if args.compare_heads else None
         formatter.print_head_comparison(data, args.layer, heads)
+    elif args.export_json:
+        exporter = DataExporter()
+        exporter.export_to_json(data, args.export_json)
+    elif args.export_csv:
+        exporter = DataExporter()
+        exporter.export_attention_to_csv(data, args.export_csv, args.layer, args.head)
+    elif args.export_sparsity:
+        exporter = DataExporter()
+        exporter.export_sparsity_analysis(data, args.export_sparsity)
     else:
         attention, tokens = visualizer.get_attention_matrix(
             data, args.layer, args.head, not args.include_special
         )
         formatter.print_attention_matrix(attention, tokens, args.layer, args.head)
+
 
 if __name__ == "__main__":
     main()
