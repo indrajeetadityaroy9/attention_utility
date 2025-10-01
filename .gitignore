@@ -1,0 +1,5 @@
+# Project ignore rules
+.smoketest_env/
+venv/
+*.csv
+*.json
