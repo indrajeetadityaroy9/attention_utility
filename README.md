@@ -1,4 +1,4 @@
-# BERT Attention Toolkit
+# BERT Attention Utility
 CLI tool for extracting and analyzing attention mechanisms from transformer models (BERT, RoBERTa, DistilBERT, ALBERT, ELECTRA)
 
 - Extract attention weights, Q/K/V matrices, tokens, and attention rollout
