@@ -7,7 +7,7 @@ setup(
     name="bert-attention-toolkit",
     version="1.0.0",
     author="",
-    description="CLI tools for extracting BERT attention data and computing metrics",
+    description="Unified CLI tool for extracting and analyzing transformer attention patterns",
     long_description=long_description,
     long_description_content_type="text/markdown",
     packages=find_packages(),
@@ -18,9 +18,9 @@ setup(
         "numpy>=1.21.0",
         "pandas>=1.3.0",
         "pyarrow>=8.0.0",
+        "scipy>=1.7.0",
     ],
     scripts=[
-        "bert-extract",
-        "bert-metrics",
+        "bert-attention.py",
     ],
 )
